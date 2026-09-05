@@ -16,7 +16,7 @@ if not st.session_state.authenticated:
     st.title("🔒 나만의 쇼츠 발굴기 로그인")
     pwd = st.text_input("비밀번호를 입력하세요:", type="password")
     if st.button("로그인"):
-        if pwd == "mysecretpassword123":
+        if pwd == "sunsun360535!":
             st.session_state.authenticated = True
             st.rerun()
         else:

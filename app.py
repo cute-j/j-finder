@@ -1,276 +1,251 @@
 import streamlit as st
-import pandas as pd
 from googleapiclient.discovery import build
-from youtube_transcript_api import YouTubeTranscriptApi
-import openai
 from datetime import datetime, timedelta
+from youtube_transcript_api import YouTubeTranscriptApi
+import re
+from openai import OpenAI
+import pandas as pd
+import os
 
-# 기본 페이지 설정
-st.set_page_config(page_title="Celebrity Shopping Shorts Finder", layout="wide")
+# ---------------------------------------------------------
+# [1] 웹 페이지 기본 설정 & 비밀번호 잠금 기능
+# ---------------------------------------------------------
+st.set_page_config(page_title="연예인 쇼핑 쇼츠 발굴기", layout="wide")
 
-# 1. 로그인 인증
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+MY_PASSWORD = "sunsun360535!"  # <-- 원하는 비밀번호로 변경하세요!
 
-if not st.session_state.authenticated:
-    st.title("🔒 나만의 쇼츠 발굴기 로그인")
-    pwd = st.text_input("비밀번호를 입력하세요:", type="password")
-    if st.button("로그인"):
-        if pwd == "sunsun360535!":
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 올바르지 않습니다.")
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        st.title("🔒 나만의 쇼츠 발굴기 로그인")
+        user_input = st.text_input("비밀번호를 입력하세요", type="password")
+        if st.button("로그인"):
+            if user_input == MY_PASSWORD:
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else:
+                st.error("❌ 비밀번호가 올바르지 않습니다.")
+        return False
+    return True
+
+if not check_password():
     st.stop()
 
-# 세션 상태 초기화 (즐겨찾기용)
-if "favorites" not in st.session_state:
-    st.session_state.favorites = []
+# ---------------------------------------------------------
+# [2] 즐겨찾기 저장/불러오기 로직 (CSV 파일 활용)
+# ---------------------------------------------------------
+FAV_FILE = "favorites.csv"
 
-# 2. 메인 화면 및 사이드바 설정
-st.title("🛍️ 셀럽/쇼핑 떡상 쇼츠 & AI 대본 생성기")
+def load_favorites():
+    if os.path.exists(FAV_FILE):
+        return pd.read_csv(FAV_FILE)
+    return pd.DataFrame(columns=["video_id", "title", "channel_title", "views", "subscribers", "viral_score"])
 
-st.sidebar.header("🔑 API 키 설정")
-youtube_api_key = st.sidebar.text_input("YouTube API Key", type="password")
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-
-# 탭 구성
-tab1, tab2, tab3 = st.tabs(["🔥 조회수 폭발 쇼츠 & AI대본", "👑 황금 채널 발굴기", "⭐ 즐겨찾기 목록"])
-
-# ==========================================
-# TAB 1: 조회수 폭발 쇼츠 + AI 대본 기능
-# ==========================================
-with tab1:
-    st.header("🔥 조회수 폭발 쇼츠 발굴 및 대본 추출")
-    col1, col2, col3 = st.columns([2, 1, 1])
-    
-    with col1:
-        query = st.text_input("검색어 입력", value="연예인 착장 쇼핑", key="t1_q")
-    with col2:
-        max_results = st.slider("수집 영상 수", 5, 30, 10, key="t1_m")
-    with col3:
-        date_range = st.selectbox(
-            "📅 게시 기간 선택",
-            ["전체 기간", "최근 1주일", "최근 1개월", "최근 3개월", "최근 1년"],
-            key="t1_d"
-        )
-
-    if st.button("쇼츠 발굴 시작!", key="btn_t1"):
-        if not youtube_api_key:
-            st.warning("사이드바에 YouTube API Key를 입력해주세요.")
-        else:
-            try:
-                youtube = build("youtube", "v3", developerKey=youtube_api_key)
-
-                # 날짜 필터 계산 (RFC 3339)
-                published_after = None
-                now = datetime.utcnow()
-                if date_range == "최근 1주일":
-                    published_after = (now - timedelta(days=7)).isoformat() + "Z"
-                elif date_range == "최근 1개월":
-                    published_after = (now - timedelta(days=30)).isoformat() + "Z"
-                elif date_range == "최근 3개월":
-                    published_after = (now - timedelta(days=90)).isoformat() + "Z"
-                elif date_range == "최근 1년":
-                    published_after = (now - timedelta(days=365)).isoformat() + "Z"
-
-                search_kwargs = {
-                    "q": query,
-                    "part": "snippet",
-                    "type": "video",
-                    "videoDuration": "short",
-                    "maxResults": max_results,
-                    "order": "viewCount"
-                }
-                if published_after:
-                    search_kwargs["publishedAfter"] = published_after
-
-                search_res = youtube.search().list(**search_kwargs).execute()
-                v_ids = [item["id"]["videoId"] for item in search_res.get("items", [])]
-
-                if not v_ids:
-                    st.info("해당 조건에 만족하는 쇼츠가 없습니다.")
-                else:
-                    stats_res = youtube.videos().list(
-                        part="snippet,statistics",
-                        id=",".join(v_ids)
-                    ).execute()
-
-                    results = []
-                    for item in stats_res.get("items", []):
-                        v_id = item["id"]
-                        title = item["snippet"]["title"]
-                        channel_title = item["snippet"]["channelTitle"]
-                        views = int(item["statistics"].get("viewCount", 0))
-                        published_at = item["snippet"]["publishedAt"][:10]
-                        url = f"https://www.youtube.com/shorts/{v_id}"
-
-                        results.append({
-                            "영상ID": v_id,
-                            "제목": title,
-                            "채널명": channel_title,
-                            "조회수": views,
-                            "게시일": published_at,
-                            "링크": url
-                        })
-
-                    st.session_state.search_results = results
-
-            except Exception as e:
-                st.error(f"오류가 발생했습니다: {e}")
-
-    # 검색 결과가 세션에 있는 경우 출력
-    if "search_results" in st.session_state and st.session_state.search_results:
-        df = pd.DataFrame(st.session_state.search_results)
-        st.subheader(f"📊 검색 결과 목록")
-        st.dataframe(
-            df.drop(columns=["영상ID"]),
-            column_config={"링크": st.column_config.LinkColumn("쇼츠 보기")},
-            hide_index=True,
-            use_container_width=True
-        )
-
-        st.markdown("---")
-        st.subheader("✍️ AI 벤치마킹 대본 생성기")
-        selected_title = st.selectbox("대본을 추출 및 재작성할 쇼츠를 선택하세요:", df["제목"].tolist())
-        selected_item = next(item for item in st.session_state.search_results if item["제목"] == selected_title)
-
-        col_act1, col_act2 = st.columns(2)
-        
-        # 버튼 1: 즐겨찾기 추가
-        with col_act1:
-            if st.button("⭐ 선택한 쇼츠 즐겨찾기에 추가"):
-                fav_data = {k: v for k, v in selected_item.items() if k != "영상ID"}
-                if fav_data not in st.session_state.favorites:
-                    st.session_state.favorites.append(fav_data)
-                    st.success("즐겨찾기에 추가되었습니다!")
-                else:
-                    st.info("이미 저장되어 있는 항목입니다.")
-
-        # 버튼 2: AI 대본 작성
-        with col_act2:
-            if st.button("📝 AI 벤치마킹 대본 생성하기"):
-                if not openai_api_key:
-                    st.warning("사이드바에 OpenAI API Key를 입력해주세요.")
-                else:
-                    try:
-                        # 자막 추출 시도
-                        v_id = selected_item["영상ID"]
-                        transcript_text = ""
-                        try:
-                            transcript_list = YouTubeTranscriptApi.get_transcript(v_id, languages=['ko', 'en'])
-                            transcript_text = " ".join([t['text'] for t in transcript_list])
-                        except:
-                            transcript_text = "자막을 직접 불러올 수 없어 영상 제목을 기반으로 작성합니다."
-
-                        # OpenAI 대본 생성 요청
-                        openai.api_key = openai_api_key
-                        prompt = f"""
-                        당신은 쇼핑/패션 쇼츠 전문 크리에이터입니다.
-                        아래 원본 쇼츠 정보를 바탕으로, 조회수가 터질 수 있는 60초 분량의 신규 벤치마킹 쇼츠 대본을 작성해주세요.
-
-                        [원본 제목]: {selected_item['제목']}
-                        [원본 자막 내용]: {transcript_text}
-
-                        [작성 형시]:
-                        1. 훅(Hook) - 초반 3초 시선 집중 대사
-                        2. 본문(Body) - 핵심 내용 요약 및 추천 멘트
-                        3. 결론(CTA) - 구독/댓글 유도 멘트
-                        """
-
-                        with st.spinner("AI가 대본을 작성 중입니다..."):
-                            response = openai.ChatCompletion.create(
-                                model="gpt-3.5-turbo",
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            ai_script = response.choices[0].message.content
-
-                        st.subheader("🤖 생성된 AI 쇼츠 대본")
-                        st.write(ai_script)
-
-                    except Exception as e:
-                        st.error(f"대본 생성 중 오류가 발생했습니다: {e}")
-
-# ==========================================
-# TAB 2: 황금 채널 발굴기
-# ==========================================
-with tab2:
-    st.header("👑 황금 채널 발굴기 (구독자 대비 조회수 폭발 채널)")
-    col1_c, col2_c = st.columns(2)
-    with col1_c:
-        channel_query = st.text_input("채널 검색 키워드", value="연예인 패션", key="t2_q")
-    with col2_c:
-        max_channels = st.slider("검색할 채널 수", 3, 15, 5, key="t2_m")
-
-    if st.button("황금 채널 찾기", key="btn_t2"):
-        if not youtube_api_key:
-            st.warning("사이드바에 YouTube API Key를 입력해주세요.")
-        else:
-            try:
-                youtube = build("youtube", "v3", developerKey=youtube_api_key)
-                
-                ch_search = youtube.search().list(
-                    q=channel_query,
-                    part="snippet",
-                    type="channel",
-                    maxResults=max_channels
-                ).execute()
-
-                ch_ids = [item["id"]["channelId"] for item in ch_search.get("items", [])]
-
-                if not ch_ids:
-                    st.info("검색된 채널이 없습니다.")
-                else:
-                    ch_stats = youtube.channels().list(
-                        part="snippet,statistics",
-                        id=",".join(ch_ids)
-                    ).execute()
-
-                    ch_results = []
-                    for item in ch_stats.get("items", []):
-                        title = item["snippet"]["title"]
-                        subs = int(item["statistics"].get("subscriberCount", 0))
-                        views = int(item["statistics"].get("viewCount", 0))
-                        v_count = int(item["statistics"].get("videoCount", 1))
-                        ch_url = f"https://www.youtube.com/channel/{item['id']}"
-                        
-                        avg_views = int(views / v_count) if v_count > 0 else 0
-
-                        ch_results.append({
-                            "채널명": title,
-                            "구독자 수": subs,
-                            "총 영상 수": v_count,
-                            "영상당 평균 조회수": avg_views,
-                            "채널 링크": ch_url
-                        })
-
-                    ch_df = pd.DataFrame(ch_results)
-                    st.subheader("🏆 발견된 채널 목록")
-                    st.dataframe(
-                        ch_df,
-                        column_config={"채널 링크": st.column_config.LinkColumn("채널 방문")},
-                        hide_index=True,
-                        use_container_width=True
-                    )
-
-            except Exception as e:
-                st.error(f"오류가 발생했습니다: {e}")
-
-# ==========================================
-# TAB 3: 즐겨찾기 목록
-# ==========================================
-with tab3:
-    st.header("⭐ 내가 저장한 즐겨찾기 목록")
-    if not st.session_state.favorites:
-        st.info("아직 저장된 즐겨찾기가 없습니다. 첫 번째 탭에서 쇼츠를 보관해 보세요!")
+def save_to_favorites(item):
+    df = load_favorites()
+    if item['video_id'] in df['video_id'].values:
+        st.warning("이미 즐겨찾기에 등록된 영상입니다.")
     else:
-        fav_df = pd.DataFrame(st.session_state.favorites)
-        st.dataframe(
-            fav_df,
-            column_config={"링크": st.column_config.LinkColumn("쇼츠 바로가기")},
-            hide_index=True,
-            use_container_width=True
+        new_row = pd.DataFrame([{
+            "video_id": item['video_id'],
+            "title": item['title'],
+            "channel_title": item['channel_title'],
+            "views": item['views'],
+            "subscribers": item['subscribers'],
+            "viral_score": item['viral_score']
+        }])
+        df = pd.concat([df, new_row], ignore_index=True)
+        df.to_csv(FAV_FILE, index=False)
+        st.success("⭐ 즐겨찾기에 추가되었습니다!")
+
+# ---------------------------------------------------------
+# [3] 사이드바 설정
+# ---------------------------------------------------------
+st.title("🔥 연예인 쇼핑 쇼츠 발굴기")
+
+if st.sidebar.button("🔒 로그아웃"):
+    st.session_state["password_correct"] = False
+    st.rerun()
+
+st.sidebar.header("⚙️ 검색 및 API 설정")
+youtube_api_key = st.sidebar.text_input("YouTube API Key", type="password")
+openai_api_key = st.sidebar.text_input("OpenAI API Key (AI대본용)", type="password")
+
+st.sidebar.divider()
+keyword = st.sidebar.text_input("검색 키워드", value="연예인 추천템")
+
+col_sub, col_views = st.sidebar.columns(2)
+max_subscribers = col_sub.number_input("최대 구독자 수", value=100000, step=10000)
+min_views = col_views.number_input("최소 조회수", value=50000, step=10000)
+
+search_btn = st.sidebar.button("떡상 쇼츠 검색하기")
+
+# [기능] 쇼핑 링크 감지
+def detect_shopping_links(text):
+    shopping_domains = ['coupang.com', 'smartstore.naver.com', 'musinsa.com', '29cm.co.kr', 'a-bly.com', 'zigzag.kr', 'brandi.co.kr']
+    found_links = []
+    urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%09[0-9a-fA-F][0-9a-fA-F]))+', text)
+    for url in urls:
+        if any(domain in url for domain in shopping_domains):
+            found_links.append(url)
+    return found_links
+
+# [기능] OpenAI 대본 생성
+def generate_ai_script(openai_key, original_script, video_title):
+    try:
+        client = OpenAI(api_key=openai_key)
+        prompt = f"""
+        당신은 연예인 쇼핑 쇼츠 전문 크리에이터입니다.
+        아래 원본 영상 자막을 바탕으로 30초 쇼츠용 [녹음용 나레이션 대본]과 [화면 삽입용 핵심 자막]을 구분하여 작성해 주세요.
+
+        [영상 제목]: {video_title}
+        [원본 자막]: {original_script}
+
+        [작성 형식]:
+        ---
+        🎤 **30초 나레이션 대본:**
+        (녹음할 내용을 구어체로 작성)
+
+        🎬 **화면 자막용 핵심 문구:**
+        (영상 화면에 크게 띄울 핵심 단어/문장 5~7개)
+        """
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
         )
-        if st.button("즐겨찾기 전체 비우기"):
-            st.session_state.favorites = []
-            st.rerun()
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI 대본 생성 실패: {str(e)}"
+
+# 유튜브 데이터 수집
+def get_shorts_data(api_key, keyword, max_sub, min_v):
+    youtube = build("youtube", "v3", developerKey=api_key)
+    published_after = (datetime.utcnow() - timedelta(days=60)).isoformat() + "Z"
+    search_response = youtube.search().list(
+        q=keyword, part="snippet", maxResults=20, type="video",
+        videoDuration="short", publishedAfter=published_after, order="viewCount"
+    ).execute()
+
+    video_ids = [item['id']['videoId'] for item in search_response.get('items', [])]
+    if not video_ids: return []
+
+    videos_response = youtube.videos().list(part="snippet,statistics", id=",".join(video_ids)).execute()
+
+    results = []
+    for video in videos_response.get('items', []):
+        views = int(video['statistics'].get('viewCount', 0))
+        if views < min_v: continue
+            
+        channel_id = video['snippet']['channelId']
+        description = video['snippet'].get('description', '')
+        detected_links = detect_shopping_links(description)
+        
+        channel_response = youtube.channels().list(part="statistics", id=channel_id).execute()
+        subscribers = int(channel_response['items'][0]['statistics'].get('subscriberCount', 0))
+        
+        if subscribers <= max_sub:
+            viral_score = round(views / max(subscribers, 1), 1)
+            results.append({
+                "video_id": video['id'],
+                "title": video['snippet']['title'],
+                "channel_title": video['snippet']['channelTitle'],
+                "views": views,
+                "subscribers": subscribers,
+                "viral_score": viral_score,
+                "thumbnail": video['snippet']['thumbnails']['high']['url'],
+                "shopping_links": detected_links
+            })
+    return results
+
+# ---------------------------------------------------------
+# [4] 상단 메뉴 탭 구성 (골든파인더 화면 방식)
+# ---------------------------------------------------------
+tab1, tab2, tab3 = st.tabs(["🚀 조회수 폭발 쇼츠", "🏆 황금채널 발굴기", "⭐ 즐겨찾기 목록"])
+
+# 세션 상태에 수집 데이터 저장
+if "collected_data" not in st.session_state:
+    st.session_state["collected_data"] = []
+
+if search_btn:
+    if not youtube_api_key:
+        st.warning("사이드바에 YouTube API Key를 입력해주세요.")
+    else:
+        with st.spinner("떡상 쇼츠 및 쇼핑 데이터 수집 중..."):
+            st.session_state["collected_data"] = get_shorts_data(youtube_api_key, keyword, max_subscribers, min_views)
+
+# --- [TAB 1] 조회수 폭발 쇼츠 ---
+with tab1:
+    data = st.session_state["collected_data"]
+    if not data:
+        st.info("사이드바에서 조건을 입력하고 [떡상 쇼츠 검색하기] 버튼을 눌러주세요.")
+    else:
+        st.success(f"총 {len(data)}개의 떡상 쇼츠를 발굴했습니다!")
+        cols = st.columns(3)
+        for idx, item in enumerate(data):
+            with cols[idx % 3]:
+                st.image(item['thumbnail'], use_container_width=True)
+                st.markdown(f"**[{item['title']}](https://youtube.com/shorts/{item['video_id']})**")
+                st.caption(f"📺 채널명: {item['channel_title']}")
+                st.write(f"👥 구독자: **{item['subscribers']:,}명** | 👁️ 조회수: **{item['views']:,}회**")
+                st.write(f"🚀 떡상지수: **{item['viral_score']}배**")
+                
+                # 즐겨찾기 버튼
+                if st.button("⭐ 즐겨찾기 저장", key=f"fav_{item['video_id']}"):
+                    save_to_favorites(item)
+
+                if item['shopping_links']:
+                    st.success(f"🛒 쇼핑 링크 감지됨 ({len(item['shopping_links'])}개)")
+                    with st.expander("감지된 링크 보기"):
+                        for link in item['shopping_links']:
+                            st.write(link)
+                else:
+                    st.caption("🛒 감지된 쇼핑 링크 없음")
+                
+                if st.button(f"✨ AI 대본 생성하기", key=f"ai_{item['video_id']}"):
+                    try:
+                        transcript = YouTubeTranscriptApi.get_transcript(item['video_id'], languages=['ko'])
+                        script_text = " ".join([t['text'] for t in transcript])
+                        if not openai_api_key:
+                            st.warning("사이드바에 OpenAI API Key를 입력해 주세요.")
+                            st.text_area("원본 자막", script_text, height=150)
+                        else:
+                            with st.spinner("ChatGPT가 대본 및 자막을 작성 중입니다..."):
+                                ai_script = generate_ai_script(openai_api_key, script_text, item['title'])
+                                st.markdown(ai_script)
+                    except Exception:
+                        st.error("자막 데이터를 추출할 수 없습니다.")
+                st.divider()
+
+# --- [TAB 2] 황금채널 발굴기 ---
+with tab2:
+    st.subheader("🏆 발견된 황금 채널 순위")
+    data = st.session_state["collected_data"]
+    if not data:
+        st.info("먼저 쇼츠 검색을 실행해 주세요.")
+    else:
+        df_data = pd.DataFrame(data)
+        # 채널별 그룹화 (평균 떡상지수 및 평균 조회수 계산)
+        channel_summary = df_data.groupby('channel_title').agg(
+            구독자수=('subscribers', 'first'),
+            발굴된쇼츠수=('video_id', 'count'),
+            최대조회수=('views', 'max'),
+            평균떡상지수=('viral_score', 'mean')
+        ).reset_index().sort_values(by='평균떡상지수', ascending=False)
+        
+        st.dataframe(channel_summary, use_container_width=True)
+
+# --- [TAB 3] 즐겨찾기 목록 ---
+with tab3:
+    st.subheader("⭐ 저장된 즐겨찾기 영상")
+    fav_df = load_favorites()
+    if fav_df.empty:
+        st.info("저장된 즐겨찾기가 없습니다. 쇼츠 카드에서 [⭐ 즐겨찾기 저장]을 눌러보세요!")
+    else:
+        st.dataframe(fav_df, use_container_width=True)
+        if st.button("🗑️ 즐겨찾기 전체 삭제"):
+            if os.path.exists(FAV_FILE):
+                os.remove(FAV_FILE)
+                st.rerun()

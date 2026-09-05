@@ -70,8 +70,8 @@ if st.sidebar.button("🔒 로그아웃"):
     st.rerun()
 
 st.sidebar.header("⚙️ 검색 및 API 설정")
-youtube_api_key = st.sidebar.text_input("YouTube API Key", type="password")
-openai_api_key = st.sidebar.text_input("OpenAI API Key (AI대본용)", type="password")
+youtube_api_key = st.secrets.get("YOUTUBE_API_KEY", "") or st.sidebar.text_input("YouTube API Key", type="password")
+openai_api_key = st.secrets.get("OPENAI_API_KEY", "") or st.sidebar.text_input("OpenAI API Key", type="password")
 
 st.sidebar.divider()
 keyword = st.sidebar.text_input("검색 키워드", value="연예인 추천템")
